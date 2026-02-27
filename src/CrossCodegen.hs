@@ -41,6 +41,7 @@ import Flags
 import HSCParser
 
 import qualified ATTParser as ATT
+import qualified Data.Map.Strict as Map
 
 -- A monad over IO for performing tests; keeps the command line flags
 -- and a state counter for unique filename generation.
@@ -188,10 +189,207 @@ zNext (ZCursor c above below) =
       S.EmptyL -> End (above |> c)
       c' :< below' -> Zipper (ZCursor c' (above |> c) below')
 
+------------------------------------------------------------------------
+-- Batch compilation: reduces hundreds of individual C compilations
+-- to a single compilation by collecting all constant-like directives,
+-- compiling them in one go to assembly, and extracting all results.
+------------------------------------------------------------------------
+
+-- | Unique identifier for each batched constant.
+type BatchId = Int
+
+-- | A conditional frame captures all the preprocessor directives needed
+-- to establish the conditional context for one nesting level.
+-- E.g. for "#ifdef A" followed by "#else", the frame is
+-- ["#ifdef A\n", "#else\n"].
+type CondFrame = [String]
+
+-- | Stack of conditional frames, innermost first (most recent on top).
+type CondStack = [CondFrame]
+
+-- | A single batch entry: a C expression to evaluate with its
+-- conditional context.
+data BatchEntry = BatchEntry
+    { beId   :: !BatchId
+    , beExpr :: !String
+    , beCond :: !CondStack
+    }
+
+-- | Index for looking up batch IDs by source position.
+data BatchIndex = BatchIndex
+    { biSimple :: !(Map.Map (Int, Int) BatchId)
+      -- ^ (line, col) -> batch ID for const/size/alignment/offset/peek/poke/ptr
+    , biEnum   :: !(Map.Map (Int, Int) [(Maybe String, String, BatchId)])
+      -- ^ (line, col) -> [(hsName, cName, batchId)] for enum directives
+    }
+
+-- | Pre-resolved batch results for fast lookup during output.
+data ResolvedBatch = ResolvedBatch
+    { rbConsts :: !(Map.Map (Int, Int) Integer)
+      -- ^ (line, col) -> value for simple directives
+    , rbEnums  :: !(Map.Map (Int, Int) [(Maybe String, String, Integer)])
+      -- ^ (line, col) -> [(hsName, cName, value)] for enum directives
+    }
+
+-- | Empty batch results (no pre-computed values).
+emptyBatch :: ResolvedBatch
+emptyBatch = ResolvedBatch Map.empty Map.empty
+
+-- | Walk the token stream and collect all batchable directives with
+-- their conditional context. Returns the list of batch entries and
+-- an index for looking up results by source position.
+collectBatchEntries :: [Token] -> ([BatchEntry], BatchIndex)
+collectBatchEntries toks = go 0 [] [] Map.empty Map.empty toks
+  where
+    go _nextId _cond entries simpleIdx enumIdx [] =
+        (reverse entries, BatchIndex simpleIdx enumIdx)
+    go nextId cond entries simpleIdx enumIdx (tok : rest) = case tok of
+        Special pos key value
+            -- Push a new conditional frame
+            | key `elem` ["if", "ifdef", "ifndef"] ->
+                let frame = ["#" ++ key ++ " " ++ value ++ "\n"]
+                in go nextId (frame : cond) entries simpleIdx enumIdx rest
+            -- Extend the current innermost frame with elif
+            | key == "elif" -> case cond of
+                (frame : frames) ->
+                    go nextId ((frame ++ ["#elif " ++ value ++ "\n"]) : frames)
+                       entries simpleIdx enumIdx rest
+                [] -> go nextId cond entries simpleIdx enumIdx rest
+            -- Extend the current innermost frame with else
+            | key == "else" -> case cond of
+                (frame : frames) ->
+                    go nextId ((frame ++ ["#else\n"]) : frames)
+                       entries simpleIdx enumIdx rest
+                [] -> go nextId cond entries simpleIdx enumIdx rest
+            -- Pop the innermost frame
+            | key == "endif" -> case cond of
+                (_ : frames) -> go nextId frames entries simpleIdx enumIdx rest
+                []           -> go nextId [] entries simpleIdx enumIdx rest
+            -- Batchable simple directives
+            | key == "const" ->
+                addSimple nextId cond pos value entries simpleIdx enumIdx rest
+            | key == "size" ->
+                addSimple nextId cond pos ("sizeof(" ++ value ++ ")")
+                    entries simpleIdx enumIdx rest
+            | key == "alignment" ->
+                addSimple nextId cond pos (alignment value)
+                    entries simpleIdx enumIdx rest
+            | key `elem` ["offset", "peek", "poke", "ptr"] ->
+                addSimple nextId cond pos ("offsetof(" ++ value ++ ")")
+                    entries simpleIdx enumIdx rest
+            -- Enum: multiple constants per directive
+            | key == "enum" -> case parseEnum value of
+                Nothing -> go nextId cond entries simpleIdx enumIdx rest
+                Just (_, _, enums) ->
+                    let (nextId', newEntries, lookupEntries) =
+                            mkEnumEntries nextId cond enums
+                        SourcePos _ l c = pos
+                        enumIdx' = Map.insert (l, c) lookupEntries enumIdx
+                    in go nextId' cond (reverse newEntries ++ entries)
+                          simpleIdx enumIdx' rest
+            -- Non-batchable directives (type, include, define, etc.)
+            | otherwise -> go nextId cond entries simpleIdx enumIdx rest
+        -- Text tokens: skip
+        _ -> go nextId cond entries simpleIdx enumIdx rest
+
+    addSimple nextId cond pos cExpr entries simpleIdx enumIdx rest =
+        let entry = BatchEntry nextId cExpr cond
+            SourcePos _ l c = pos
+            simpleIdx' = Map.insert (l, c) nextId simpleIdx
+        in go (nextId + 1) cond (entry : entries) simpleIdx' enumIdx rest
+
+    mkEnumEntries nextId _ [] = (nextId, [], [])
+    mkEnumEntries nextId cond ((hsName, cName) : more) =
+        let entry = BatchEntry nextId cName cond
+            (nextId', moreEntries, moreLookup) =
+                mkEnumEntries (nextId + 1) cond more
+        in (nextId', entry : moreEntries, (hsName, cName, nextId) : moreLookup)
+
+-- | Generate a single C source file that computes all batch entries.
+-- The file includes the full header context (template, flags, all
+-- preprocessor directives from the .hsc file) followed by the batch
+-- entries, each wrapped in their conditional guards.
+generateBatchC :: Config -> [Flag] -> [Token] -> [BatchEntry] -> String
+generateBatchC config flags toks entries =
+    -- Preamble: reproduces the file's include/define/conditional context
+    outTemplateHeaderCProg (cTemplate config) ++
+    concatMap outFlagHeaderCProg flags ++
+    concatMap outHeaderCProg' toks ++
+    -- BOM marker for endianness detection (used by ATTParser)
+    "\nextern unsigned long long ___hsc2hs_BOM___;\n" ++
+    "unsigned long long ___hsc2hs_BOM___ = 0x100000000;\n\n" ++
+    -- All batch entries with their conditional guards
+    concatMap emitEntry entries
+  where
+    emitEntry (BatchEntry bid cExpr cond) =
+        let name      = "_hsc2hs_v" ++ show bid
+            -- Reverse cond stack to get outermost-first order for C output
+            outerFirst = reverse cond
+            openCond   = concatMap concat outerFirst
+            closeCond  = concat (replicate (length cond) "#endif\n")
+        in  openCond ++
+            "extern unsigned long long " ++ name ++ "___hsc2hs_sign___;\n" ++
+            "unsigned long long " ++ name ++ "___hsc2hs_sign___ = (" ++
+                cExpr ++ ") < 0;\n" ++
+            "extern unsigned long long " ++ name ++ ";\n" ++
+            "unsigned long long " ++ name ++ " = (" ++ cExpr ++ ");\n" ++
+            closeCond ++ "\n"
+
+-- | Compile all batch entries in a single C -> assembly compilation,
+-- then parse the assembly to extract all constant values.
+-- Returns a map from batch ID to extracted integer value.
+-- On failure, returns an empty map (callers fall through to the
+-- per-directive path).
+runBatchCompile :: [BatchEntry] -> [Token] -> TestMonad (Map.Map BatchId Integer)
+runBatchCompile entries toks = do
+    config <- testGetConfig
+    flags <- testGetFlags
+    let cSource = generateBatchC config flags toks entries
+    testLog ("batch compiling " ++ show (length entries) ++ " constants") $ do
+        result <- makeTest3 (".c", ".s", ".txt") $ \(cFile, sFile, stdout) -> do
+            liftTestIO $ writeBinaryFile cFile cSource
+            compiler <- testGetCompiler
+            success <- runCompiler compiler
+                           (["-S", "-c", cFile, "-o", sFile] ++
+                            [f | CompFlag f <- flags])
+                           (Just stdout)
+            if success
+                then do
+                    asm <- liftTestIO $ ATT.parse sFile
+                    return $ Map.fromList
+                        [ (beId entry, val)
+                        | entry <- entries
+                        , let name = "_hsc2hs_v" ++ show (beId entry)
+                        , Just val <- [ATT.lookupInteger name asm]
+                        ]
+                else return Map.empty
+        testLog' $ "batch resolved " ++ show (Map.size result) ++
+                   " of " ++ show (length entries) ++ " constants"
+        return result
+
+-- | Resolve batch compilation results into fast-lookup maps keyed by
+-- source position (line, col).
+resolveBatch :: Map.Map BatchId Integer -> BatchIndex -> ResolvedBatch
+resolveBatch results idx = ResolvedBatch
+    { rbConsts = Map.mapMaybe (\bid -> Map.lookup bid results) (biSimple idx)
+    , rbEnums  = Map.mapMaybe resolveEnum (biEnum idx)
+    }
+  where
+    resolveEnum enumEntries =
+        let resolved = [ (hs, c, val)
+                       | (hs, c, bid) <- enumEntries
+                       , Just val <- [Map.lookup bid results]
+                       ]
+        -- Only return resolved list if ALL enum values were found;
+        -- partial resolution falls through to per-directive path.
+        in if length resolved == length enumEntries
+           then Just resolved
+           else Nothing
+
 -- Generates the .hs file from the .hsc file, by looping over each
 -- Special element and calling outputSpecial to find out what it needs.
-diagnose :: String -> (String -> TestMonad ()) -> [Token] -> TestMonad ()
-diagnose inputFilename output input = do
+diagnose :: ResolvedBatch -> String -> (String -> TestMonad ()) -> [Token] -> TestMonad ()
+diagnose batch inputFilename output input = do
     checkValidity input
     output ("{-# LINE 1 \"" ++ inputFilename ++ "\" #-}\n")
     loop (True, True) (zipFromList input)
@@ -209,14 +407,14 @@ diagnose inputFilename output input = do
                                                (skipFalseConditional (zNext z))
             "endif" -> loop state (zNext z)
             _ -> do
-                sync <- outputSpecial output z
+                sync <- outputSpecial batch output z
                 loop (lineSync && sync, colSync && sync) (zNext z)
     loop state (Zipper z@ZCursor {zCursor=Text pos txt}) = do
         state' <- outputText state output pos txt
         loop state' (zNext z)
 
-outputSpecial :: (String -> TestMonad ()) -> ZCursor Token -> TestMonad Bool
-outputSpecial output (z@ZCursor {zCursor=Special pos@(SourcePos file line _)  key value}) =
+outputSpecial :: ResolvedBatch -> (String -> TestMonad ()) -> ZCursor Token -> TestMonad Bool
+outputSpecial batch output (z@ZCursor {zCursor=Special pos@(SourcePos file line col) key value}) =
     case key of
        "const" -> outputConst value show >> return False
        "offset" -> outputConst ("offsetof(" ++ value ++ ")") (\i -> "(" ++ show i ++ ")") >> return False
@@ -229,15 +427,22 @@ outputSpecial output (z@ZCursor {zCursor=Special pos@(SourcePos file line _)  ke
        "ptr" -> outputConst ("offsetof(" ++ value ++ ")")
                             (\i -> "(\\hsc_ptr -> hsc_ptr `plusPtr` " ++ show i ++ ")") >> return False
        "type" -> computeType z >>= output >> return False
-       "enum" -> computeEnum z >>= output >> return False
+       "enum" -> computeEnumBatch batch z >>= output >> return False
        "error" -> testFail pos ("#error " ++ value)
        "warning" -> liftTestIO $ putStrLn (file ++ ":" ++ show line ++ " warning: " ++ value) >> return True
        "include" -> return True
        "define" -> return True
        "undef" -> return True
        _ -> testFail pos ("directive " ++ key ++ " cannot be handled in cross-compilation mode")
-    where outputConst value' formatter = computeConst z value' >>= (output . formatter)
-outputSpecial _ _ = error "outputSpecial's argument isn't a Special"
+    where
+    posKey = (line, col)
+    -- Fast path: look up pre-computed value from batch results.
+    -- Falls through to per-directive computeConst on miss.
+    outputConst cExpr formatter =
+        case Map.lookup posKey (rbConsts batch) of
+            Just val -> output (formatter val)
+            Nothing  -> computeConst z cExpr >>= (output . formatter)
+outputSpecial _ _ _ = error "outputSpecial's argument isn't a Special"
 
 outputText :: (Bool, Bool) -> (String -> TestMonad ()) -> SourcePos -> String
            -> TestMonad (Bool, Bool)
@@ -477,6 +682,25 @@ computeEnum z@(ZCursor (Special _ _ enumText) _ _) =
     where concatM l = liftM concat . forM l
 computeEnum _ = error "computeEnum argument isn't a Special"
 
+-- | Batch-aware enum computation. Checks the batch results first;
+-- falls through to per-directive computeEnum on miss.
+computeEnumBatch :: ResolvedBatch -> ZCursor Token -> TestMonad String
+computeEnumBatch batch z@(ZCursor (Special (SourcePos _ line col) _ enumText) _ _) =
+    case Map.lookup (line, col) (rbEnums batch) of
+        Just resolvedEnums ->
+            case parseEnum enumText of
+                Nothing -> return ""
+                Just (enumType, constructor, _) ->
+                    return $ concat
+                        [ hsName ++ " :: " ++ stringify enumType ++ "\n" ++
+                          hsName ++ " = " ++ stringify constructor ++ " " ++
+                          showsPrec 11 val "\n"
+                        | (maybeHsName, cName, val) <- resolvedEnums
+                        , let hsName = fromMaybe (haskellize cName) maybeHsName
+                        ]
+        Nothing -> computeEnum z
+computeEnumBatch _ _ = error "computeEnumBatch argument isn't a Special"
+
 -- Implementation of #{type}, using computeConst
 computeType :: ZCursor Token -> TestMonad String
 computeType z@(ZCursor (Special pos _ value) _ _) = do
@@ -658,8 +882,19 @@ runCompiler prog args mStdoutFile = do
 outputCross :: Config -> String -> String -> String -> String -> [Token] -> IO ()
 outputCross config outName outDir outBase inName toks =
     runTestMonad $ do
+        -- Collect all batchable directives from the token stream
+        let (entries, batchIdx) = collectBatchEntries toks
+
+        -- Batch compile if enabled and there are batchable entries
+        batch <- if cNoBatch config || null entries
+                 then return emptyBatch
+                 else do
+                     results <- runBatchCompile entries toks
+                     return (resolveBatch results batchIdx)
+
+        -- Generate output using batch results for fast constant lookup
         file <- liftTestIO $ openFile outName WriteMode
-        (diagnose inName (liftTestIO . hPutStr file) toks
+        (diagnose batch inName (liftTestIO . hPutStr file) toks
            `testFinally` (liftTestIO $ hClose file))
            `testOnException` (liftTestIO $ removeFile outName) -- cleanup on errors
     where

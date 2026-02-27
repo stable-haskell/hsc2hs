@@ -23,6 +23,7 @@ data ConfigM m = Config {
                      cCrossSafe :: Bool,
                      cColumn :: Bool,
                      cVerbose :: Bool,
+                     cNoBatch :: Bool,
                      cFlags :: [Flag]
                  }
 
@@ -47,6 +48,7 @@ emptyMode = UseConfig $ Config {
                             cCrossSafe    = False,
                             cColumn       = False,
                             cVerbose      = False,
+                            cNoBatch      = False,
                             cFlags        = []
                         }
 
@@ -86,6 +88,8 @@ options = [
         "use a crude asm parser to compute constants when cross compiling",
     Option [] ["cross-safe"] (NoArg (withConfig $ setCrossSafe True))
         "restrict .hsc directives to those supported by --cross-compile",
+    Option [] ["no-batch"] (NoArg (withConfig $ setNoBatch True))
+        "disable batched cross-compilation (for debugging)",
     Option ['k'] ["keep-files"] (NoArg (withConfig $ setKeepFiles True))
         "do not remove temporary files",
     Option [] ["column"]     (NoArg (withConfig $ setColumn True))
@@ -137,6 +141,9 @@ setCrossSafe b c = c { cCrossSafe = b }
 
 setColumn :: Bool -> ConfigM Maybe -> ConfigM Maybe
 setColumn b c = c { cColumn = b }
+
+setNoBatch :: Bool -> ConfigM Maybe -> ConfigM Maybe
+setNoBatch b c = c { cNoBatch = b }
 
 setVerbose :: Bool -> ConfigM Maybe -> ConfigM Maybe
 setVerbose v c = c { cVerbose = v }

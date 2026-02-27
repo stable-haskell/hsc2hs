@@ -115,6 +115,7 @@ processFiles configM files usage = do
                      cCrossSafe    = cCrossSafe configM,
                      cColumn       = cColumn configM,
                      cVerbose      = cVerbose configM,
+                     cNoBatch      = cNoBatch configM,
                      cFlags        = cFlags configM ++ extraFlags
                  }
 
