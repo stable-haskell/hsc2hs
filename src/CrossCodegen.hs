@@ -25,7 +25,7 @@ import Prelude hiding (concatMap)
 import System.IO (hPutStr, openFile, IOMode(..), hClose)
 import System.Directory (removeFile)
 import Data.Char (toLower,toUpper,isSpace)
-import Control.Exception (assert, onException)
+import Control.Exception (assert, onException, try, SomeException)
 import Control.Monad (when, liftM, forM, ap)
 import Control.Applicative as AP (Applicative(..))
 import Data.Foldable (concatMap)
@@ -355,13 +355,22 @@ runBatchCompile entries toks = do
                            (Just stdout)
             if success
                 then do
-                    asm <- liftTestIO $ ATT.parse sFile
-                    return $ Map.fromList
-                        [ (beId entry, val)
-                        | entry <- entries
-                        , let name = "_hsc2hs_v" ++ show (beId entry)
-                        , Just val <- [ATT.lookupInteger name asm]
-                        ]
+                    -- Use try to catch parse errors gracefully. This handles
+                    -- compilers that produce non-AT&T assembly (e.g. emcc
+                    -- producing WebAssembly text). On failure, we return an
+                    -- empty map so each directive falls through to the
+                    -- existing per-directive compilation path.
+                    parseResult <- liftTestIO $
+                        (try (ATT.parse sFile)
+                            :: IO (Either SomeException [(String, ATT.Inst)]))
+                    case parseResult of
+                        Right asm -> return $ Map.fromList
+                            [ (beId entry, val)
+                            | entry <- entries
+                            , let name = "_hsc2hs_v" ++ show (beId entry)
+                            , Just val <- [ATT.lookupInteger name asm]
+                            ]
+                        Left _e -> return Map.empty
                 else return Map.empty
         testLog' $ "batch resolved " ++ show (Map.size result) ++
                    " of " ++ show (length entries) ++ " constants"
