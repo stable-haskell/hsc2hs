@@ -25,7 +25,7 @@ import Prelude hiding (concatMap)
 import System.IO (hPutStr, openFile, IOMode(..), hClose)
 import System.Directory (removeFile)
 import Data.Char (toLower,toUpper,isSpace)
-import Control.Exception (assert, onException, try, SomeException)
+import Control.Exception (assert, evaluate, onException, try, SomeException)
 import Control.Monad (when, liftM, forM, ap)
 import Control.Applicative as AP (Applicative(..))
 import Data.Foldable (concatMap)
@@ -349,8 +349,11 @@ runBatchCompile entries toks = do
         result <- makeTest3 (".c", ".s", ".txt") $ \(cFile, sFile, stdout) -> do
             liftTestIO $ writeBinaryFile cFile cSource
             compiler <- testGetCompiler
+            -- -g0 suppresses debug/DWARF sections that produce assembly
+            -- directives (e.g. .quad/.long sequences in .debug_info) which
+            -- the ATT parser cannot handle. We only need constant values.
             success <- runCompiler compiler
-                           (["-S", "-c", cFile, "-o", sFile] ++
+                           (["-S", "-c", "-g0", cFile, "-o", sFile] ++
                             [f | CompFlag f <- flags])
                            (Just stdout)
             if success
@@ -360,8 +363,14 @@ runBatchCompile entries toks = do
                     -- producing WebAssembly text). On failure, we return an
                     -- empty map so each directive falls through to the
                     -- existing per-directive compilation path.
+                    --
+                    -- We must force the spine of the parse result inside the
+                    -- try block: ATT.parse returns a lazy thunk, so without
+                    -- forcing, errors escape the try scope entirely.
                     parseResult <- liftTestIO $
-                        (try (ATT.parse sFile)
+                        (try (do asm <- ATT.parse sFile
+                                 _ <- evaluate (length asm)
+                                 return asm)
                             :: IO (Either SomeException [(String, ATT.Inst)]))
                     case parseResult of
                         Right asm -> return $ Map.fromList
@@ -855,8 +864,10 @@ runCompileExtract k testStr = do
       liftTestIO $ writeBinaryFile cFile testStr
       flags <- testGetFlags
       compiler <- testGetCompiler
+      -- -g0 suppresses debug/DWARF sections that produce assembly
+      -- directives the ATT parser cannot handle.
       _ <- runCompiler compiler
-                  (["-S", "-c", cFile, "-o", sFile] ++ [f | CompFlag f <- flags])
+                  (["-S", "-c", "-g0", cFile, "-o", sFile] ++ [f | CompFlag f <- flags])
                   (Just stdout)
       asm <- liftTestIO $ ATT.parse sFile
       return $ fromMaybe (error "Failed to extract integer") (ATT.lookupInteger k asm)

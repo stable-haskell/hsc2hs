@@ -120,13 +120,17 @@ parseInsts (Ident name:xs) = case break isIdent xs of
 parseInsts _ = error "Invalid instructions"
 
 -- | combine instructions (e.g. two long into a quad)
+-- Unknown patterns produce a Ref sentinel that won't match any lookup,
+-- rather than crashing. This handles DWARF debug sections (e.g. Clang
+-- emitting .quad/.long/.Ltmp sequences) and WebAssembly metadata (e.g.
+-- emcc emitting multiple .ascii directives) gracefully.
 combineInst :: [Inst] -> Inst
 combineInst [Quad i] = Quad i
 combineInst [Long i] = Quad (fromIntegral i)
 combineInst [Long h, Long l] = Quad $ (shiftL (fromIntegral h) 32) .|. fromIntegral l
 combineInst [Ref s]  = Ref s
 combineInst [Ascii s] = Ascii s
-combineInst is = error $ "Cannot combine instructions: " ++ show is
+combineInst _is = Ref "<unsupported>"
 
 -- | inline references
 inlineRef :: [(String, Inst)] -> [(String, Inst)]
