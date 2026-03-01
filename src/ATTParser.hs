@@ -63,10 +63,19 @@ isNumber x       = all isDigit x
 
 -- | process the assembly instructions, filtering out
 -- identifiers and constant values.
+--
+-- Section directives are emitted as Ident nodes so that
+-- filterDebugSections can track section boundaries and
+-- discard instructions inside debug sections (e.g. COFF
+-- CodeView .debug$S emitted by Clang on Windows even with -g0).
 preprocess :: String -> [Inst]
 preprocess [] = []
 preprocess ('\t':attr) = let (h, t) = break isSpace attr
                          in case h:words' (=='\t') t of
+                         -- Section directives: emit as Ident so
+                         -- filterDebugSections can track them.
+                         (".section":x:_)           -> [Ident (".section " ++ w x)]
+
                          -- 8 byte values
                          (".quad":x:_) | isNumber (w x) -> [mkQuad $ read (w x)]
                                        | otherwise      -> [mkRef  $ (w x)]
@@ -120,17 +129,16 @@ parseInsts (Ident name:xs) = case break isIdent xs of
 parseInsts _ = error "Invalid instructions"
 
 -- | combine instructions (e.g. two long into a quad)
--- Unknown patterns produce a Ref sentinel that won't match any lookup,
--- rather than crashing. This handles DWARF debug sections (e.g. Clang
--- emitting .quad/.long/.Ltmp sequences) and WebAssembly metadata (e.g.
--- emcc emitting multiple .ascii directives) gracefully.
+-- Unknown patterns (e.g. debug section leftovers, WebAssembly metadata)
+-- are mapped to a sentinel Quad 0 instead of a Ref, so that inlineRef
+-- does not try to resolve a non-existent symbol.
 combineInst :: [Inst] -> Inst
 combineInst [Quad i] = Quad i
 combineInst [Long i] = Quad (fromIntegral i)
 combineInst [Long h, Long l] = Quad $ (shiftL (fromIntegral h) 32) .|. fromIntegral l
 combineInst [Ref s]  = Ref s
 combineInst [Ascii s] = Ascii s
-combineInst _is = Ref "<unsupported>"
+combineInst _is = Quad 0  -- sentinel: unrecognized pattern, will not match lookups
 
 -- | inline references
 inlineRef :: [(String, Inst)] -> [(String, Inst)]
@@ -146,7 +154,51 @@ fixWordOrder xs = case lookupInteger "___hsc2hs_BOM___" xs of
         go x = x
 
 parse :: FilePath -> IO [(String, Inst)]
-parse f = (fixWordOrder . inlineRef . parseInsts . concatMap preprocess . lines) `fmap` readFile f
+parse f = (fixWordOrder . inlineRef . parseInsts . filterDebugSections . concatMap preprocess . lines) `fmap` readFile f
+
+-- | Filter out instructions that fall inside debug sections.
+-- On Windows, Clang emits CodeView .debug$S sections even with -g0,
+-- containing .long/.quad directives that confuse the parser. We track
+-- section changes: when entering a debug section we drop all instructions
+-- until the next non-debug section.
+--
+-- Section directives are emitted by preprocess as Ident nodes with names
+-- like ".section .debug$S,\"dr\"" or ".section .text". Labels at column 0
+-- (e.g. ".Ltmp0") also appear as Idents.
+filterDebugSections :: [Inst] -> [Inst]
+filterDebugSections = go False
+  where
+    go _       [] = []
+    go inDebug (Ident name : rest)
+      -- ".section .debug$S,..." or ".section .debug_info,..." → enter debug mode
+      | isSectionDirective name && isDebugSectionName name = go True rest
+      -- ".section .text,..." or ".section .data,..." → exit debug mode
+      | isSectionDirective name = go False rest
+      -- Column-0 section labels like ".text" or ".data" (no ".section" prefix)
+      | isBareSectionLabel name = go False rest
+      -- Normal label inside debug section → drop it
+      | inDebug = go inDebug rest
+      -- Normal label outside debug section → keep it
+      | otherwise = Ident name : go False rest
+    go True  (_:rest) = go True rest   -- drop data instructions in debug sections
+    go False (x:rest) = x : go False rest
+
+    -- Matches Ident nodes produced by the ".section" case in preprocess,
+    -- which have the form ".section <section-name>"
+    isSectionDirective s = take 9 s == ".section "
+
+    -- Check if a .section directive names a debug section.
+    isDebugSectionName s =
+      let afterSection = drop 9 s  -- strip ".section " prefix
+      in any (`isPrefixOf'` afterSection)
+           [ ".debug$"  -- COFF CodeView (.debug$S, .debug$T)
+           , ".debug_"  -- ELF DWARF (.debug_info, .debug_abbrev, etc.)
+           ]
+
+    -- Bare section labels at column 0 (e.g. ".text", ".data", ".bss")
+    isBareSectionLabel s = s == ".text" || s == ".data" || s == ".bss"
+
+    isPrefixOf' prefix str = take (length prefix) str == prefix
 
 -- | lookup a symbol without or with underscore prefix
 lookup_ :: String -> [(String,b)] -> Maybe b

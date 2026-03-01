@@ -28,7 +28,7 @@ import Data.Char (toLower,toUpper,isSpace)
 import Control.Exception (assert, evaluate, onException, try, SomeException)
 import Control.Monad (when, liftM, forM, ap)
 import Control.Applicative as AP (Applicative(..))
-import Data.Foldable (concatMap)
+import Data.Foldable (concatMap, foldl')
 import Data.Maybe (fromMaybe)
 import qualified Data.Sequence as S
 import Data.Sequence ((|>),ViewL(..))
@@ -364,12 +364,13 @@ runBatchCompile entries toks = do
                     -- empty map so each directive falls through to the
                     -- existing per-directive compilation path.
                     --
-                    -- We must force the spine of the parse result inside the
-                    -- try block: ATT.parse returns a lazy thunk, so without
-                    -- forcing, errors escape the try scope entirely.
+                    -- We deep-force the parse result inside the try block:
+                    -- ATT.parse is lazy and errors (e.g. from inlineRef)
+                    -- can hide in unevaluated thunks inside tuple values.
+                    -- Forcing just the spine (length) is not enough.
                     parseResult <- liftTestIO $
                         (try (do asm <- ATT.parse sFile
-                                 _ <- evaluate (length asm)
+                                 _ <- evaluate (forceASM asm)
                                  return asm)
                             :: IO (Either SomeException [(String, ATT.Inst)]))
                     case parseResult of
@@ -384,6 +385,12 @@ runBatchCompile entries toks = do
         testLog' $ "batch resolved " ++ show (Map.size result) ++
                    " of " ++ show (length entries) ++ " constants"
         return result
+
+-- | Deep-force an ASM parse result so that any error thunks hiding
+-- inside tuple values are evaluated eagerly.  This ensures that
+-- 'try' in 'runBatchCompile' catches all parse/resolution errors.
+forceASM :: [(String, ATT.Inst)] -> ()
+forceASM = foldl' (\_ (k, v) -> k `seq` v `seq` ()) ()
 
 -- | Resolve batch compilation results into fast-lookup maps keyed by
 -- source position (line, col).
