@@ -119,7 +119,10 @@ processFiles configM files usage = do
                      cFlags        = cFlags configM ++ extraFlags
                  }
 
-    let outputter = if cCrossCompile config then outputCross else outputDirect
+    -- `--cross-safe` uses the assembly backend. `--via-asm` is accepted
+    -- and does not select a second backend.
+    let useCrossAsm = cCrossCompile config || cCrossSafe config
+        outputter = if useCrossAsm then outputCross else outputDirect
 
     forM_ files (\name -> do
         (outName, outDir, outBase) <- case [f | Output f <- cFlags config] of

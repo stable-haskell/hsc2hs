@@ -13,7 +13,7 @@ import Data.List ( foldl' )
 #endif
 import Data.Char                ( isAlphaNum, toUpper )
 import Data.Foldable            ( Foldable(..) )
-import Control.Monad            ( when, forM_ )
+import Control.Monad            ( when )
 
 import System.Exit              ( ExitCode(..), exitWith )
 import System.FilePath          ( normalise )
@@ -58,13 +58,6 @@ outputDirect config outName outDir outBase name toks = do
             where
             fixChar c | isAlphaNum c = toUpper c
                       | otherwise    = '_'
-
-    when (cCrossSafe config) $
-        forM_ specials (\ (SourcePos file line _,key,_) ->
-            when (not $ key `elem` ["const","offset","size","alignment","peek","poke","ptr",
-                                    "type","enum","error","warning","include","define","undef",
-                                    "if","ifdef","ifndef", "elif","else","endif"]) $
-             die (file ++ ":" ++ show line ++ " directive \"" ++ key ++ "\" is not safe for cross-compilation"))
 
     writeBinaryFile cProgName $
         outTemplateHeaderCProg (cTemplate config)++

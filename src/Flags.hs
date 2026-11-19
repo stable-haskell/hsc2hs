@@ -85,9 +85,9 @@ options = [
     Option ['x'] ["cross-compile"] (NoArg (withConfig $ setCrossCompile True))
         "activate cross-compilation mode",
     Option [] ["via-asm"] (NoArg (withConfig $ setViaAsm True))
-        "use a crude asm parser to compute constants when cross compiling",
+        "accepted for compatibility; --cross-compile always uses one assembly pass",
     Option [] ["cross-safe"] (NoArg (withConfig $ setCrossSafe True))
-        "restrict .hsc directives to those supported by --cross-compile",
+        "run the cross-compile assembly backend even for a native build",
     Option [] ["no-batch"] (NoArg (withConfig $ setNoBatch True))
         "disable batched cross-compilation (for debugging)",
     Option ['k'] ["keep-files"] (NoArg (withConfig $ setKeepFiles True))
