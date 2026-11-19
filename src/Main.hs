@@ -11,6 +11,7 @@
 
 import Control.Monad            ( liftM, forM_ )
 import Data.List                ( isSuffixOf )
+import Data.Maybe               ( isNothing )
 import System.Console.GetOpt
 
 -- If we ware building the hsc2hs
@@ -116,12 +117,16 @@ processFiles configM files usage = do
                      cColumn       = cColumn configM,
                      cVerbose      = cVerbose configM,
                      cNoBatch      = cNoBatch configM,
+                     cCrossRunner  = cCrossRunner configM,
                      cFlags        = cFlags configM ++ extraFlags
                  }
 
-    -- `--cross-safe` uses the assembly backend. `--via-asm` is accepted
-    -- and does not select a second backend.
-    let useCrossAsm = cCrossCompile config || cCrossSafe config
+    -- `--cross-safe` uses the assembly backend. `--cross-runner` forces the
+    -- direct probe even when `-x` was passed earlier. `--via-asm` is accepted
+    -- and does not select a second backend. `--no-cross-compile` clears `-x`
+    -- because flags are folded left to right.
+    let useCrossAsm = (cCrossCompile config || cCrossSafe config)
+                      && isNothing (cCrossRunner config)
         outputter = if useCrossAsm then outputCross else outputDirect
 
     forM_ files (\name -> do

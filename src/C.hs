@@ -26,10 +26,10 @@ outHeaderCProg (pos, key, arg) = case key of
     "include"           -> outCLine pos++"#include "++arg++"\n"
     "define"            -> outCLine pos++"#define "++arg++"\n"
     "undef"             -> outCLine pos++"#undef "++arg++"\n"
-    "def"               -> case arg of
-        's':'t':'r':'u':'c':'t':' ':_ -> outCLine pos++arg++"\n"
-        't':'y':'p':'e':'d':'e':'f':' ':_ -> outCLine pos++arg++"\n"
-        _ -> ""
+    -- Every `#def` is visible to the probe. Struct and typedef defs were
+    -- already emitted; function defs (including `inline` helpers used by
+    -- `#const`) must be too, or the probe cannot compile a call to them.
+    "def"               -> outCLine pos++arg++"\n"
     _ | conditional key -> outCLine pos++"#"++key++" "++arg++"\n"
     "let"               -> case break (== '=') arg of
         (_,      "")     -> ""
