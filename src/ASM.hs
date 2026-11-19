@@ -57,6 +57,7 @@ data AsmOp
     | OpConstStr
     | OpHaskellize
     | OpMangle
+    | OpTypeMarkup
     | OpInt !Integer !Word64 !Bool
     | OpStrBegin !Int
     | OpStrBytes ![Int]
@@ -221,6 +222,9 @@ asmOverrideHeader = unlines
     , "#define hsc_const_str(s)   do { HSC_RAW(\"CONST_STR\"); HSC_EMIT_STR(s); } while (0)"
     , "#define hsc_haskellize(s)  do { HSC_RAW(\"HASKELLIZE\"); HSC_EMIT_STR(s); } while (0)"
     , "#define hsc_mangle(pfx, s) do { HSC_RAW(\"MANGLE\"); HSC_EMIT_STR(pfx); HSC_EMIT_STR(s); } while (0)"
+    , "/* bindings-dsl `<ident>` becomes `C'ident` in the decoder. The C side"
+    , " * only emits the spelling, so the bytes stay an \"i\" immediate. */"
+    , "#define hsc_typemarkup(s) do { HSC_RAW(\"TYPEMARKUP\"); HSC_EMIT_STR(s); } while (0)"
     , ""
     , "#define HSC_CHUNK_BEGIN(id) __asm__ volatile (\"\\n.ascii \\\"@HSC@CHUNK_BEGIN %[i]\\\\n\\\"\\n\" :: [i]\"i\"(id) : \"memory\")"
     , "#define HSC_CHUNK_END(id)   __asm__ volatile (\"\\n.ascii \\\"@HSC@CHUNK_END %[i]\\\\n\\\"\\n\"   :: [i]\"i\"(id) : \"memory\")"
@@ -341,6 +345,7 @@ parseAsmOps = concatMap extractFromLine . lines
     parsePayload ("CONST_STR":_)     = Just OpConstStr
     parsePayload ("HASKELLIZE":_)    = Just OpHaskellize
     parsePayload ("MANGLE":_)        = Just OpMangle
+    parsePayload ("TYPEMARKUP":_)    = Just OpTypeMarkup
     parsePayload ("STR_BEGIN":n:_)   = Just (OpStrBegin (fromInteger (imm n)))
     parsePayload ("S8":bs)           = Just (OpStrBytes (map (fromInteger . imm) (take 8 bs)))
     parsePayload ("STR_END":_)       = Just OpStrEnd
@@ -395,6 +400,10 @@ decodeAsmChunks = goTop defaultAbi Map.empty
         pfx <- expectStr "mangle prefix" vPfx
         s   <- expectStr "mangle ident"  vStr
         goChunk abi cid ((pfx ++ sanitizeBindings s) : buf) ops2
+    goChunk abi cid !buf (OpTypeMarkup : ops) = do
+        (v, ops1) <- readVal ops
+        s         <- expectStr "typemarkup" v
+        goChunk abi cid (markupType s : buf) ops1
     goChunk _ cid _ [] = Left ("unterminated CHUNK_BEGIN " ++ show cid)
     goChunk _ _ _ (op : _) = Left ("unexpected op inside chunk: " ++ show op)
 
@@ -438,6 +447,36 @@ haskellize (c0:cs0) = toLower c0 : go False cs0
     go _ ('_':cs)    = go True cs
     go True  (c:cs)  = toUpper c : go False cs
     go False (c:cs)  = toLower c : go False cs
+
+-- | Rewrite bindings-dsl type spellings the way non-asm `bc_typemarkup`
+-- does. `<ident>` becomes `C'` plus the last space-or-tab-separated token
+-- inside the brackets. The brackets themselves are not copied. A span with
+-- no closing `>` still rewrites, and an empty span copies nothing.
+markupType :: String -> String
+markupType = go
+  where
+    go [] = []
+    go cs =
+        let (pre, rest) = break (== '<') cs
+        in case rest of
+            [] -> pre
+            (_:afterLt) ->
+                let (inside, rest2) = break (== '>') afterLt
+                    piece = case lastWsToken inside of
+                        ""  -> ""
+                        tok -> "C'" ++ tok
+                in case rest2 of
+                    []          -> pre ++ piece
+                    (_:afterGt) -> pre ++ piece ++ go afterGt
+
+    lastWsToken s = finish (foldl step ("", []) s)
+      where
+        step (prev, cur) c
+            | c == ' ' || c == '\t' =
+                if null cur then (prev, []) else (reverse cur, [])
+            | otherwise = (prev, c:cur)
+        finish (prev, [])  = prev
+        finish (_, cur)    = reverse cur
 
 sanitizeBindings :: String -> String
 sanitizeBindings s =
