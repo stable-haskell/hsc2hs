@@ -28,7 +28,12 @@ import System.Console.GetOpt
 import Foreign
 import Foreign.C.String
 #endif
+#if defined(__MHS__)
+import System.Directory         ( doesFileExist )
+import MhsTool.Directory        ( findExecutable )
+#else
 import System.Directory         ( doesFileExist, findExecutable )
+#endif
 import System.Environment       ( getProgName )
 import System.Exit              ( ExitCode(..), exitWith )
 import System.FilePath          ( normalise, splitFileName, splitExtension )

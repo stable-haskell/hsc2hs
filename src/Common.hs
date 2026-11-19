@@ -16,8 +16,13 @@ import System.IO
 import Control.Concurrent       ( threadDelay )
 import System.IO.Error          ( isPermissionError )
 #endif
+#if defined(__MHS__)
+import MhsTool.Process          ( createProcess, waitForProcess
+                                , proc, CreateProcess(..), StdStream(..) )
+#else
 import System.Process           ( createProcess, waitForProcess
                                 , proc, CreateProcess(..), StdStream(..) )
+#endif
 import System.Exit              ( ExitCode(..), exitWith )
 import System.Directory         ( removeFile )
 

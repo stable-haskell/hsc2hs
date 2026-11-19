@@ -41,7 +41,11 @@ import System.Posix.Types
 import qualified System.IO as IOUtils
 #endif
 
+#if defined(__MHS__)
+import System.IO (Handle)
+#else
 import GHC.IO.Handle
+#endif
 
 -- | The function creates a temporary file in ReadWrite mode.
 -- The created file isn\'t deleted automatically, so you need to delete it manually.

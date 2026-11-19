@@ -1,3 +1,4 @@
+{-# LANGUAGE CPP #-}
 {-# LANGUAGE NoMonomorphismRestriction #-}
 
 module CrossCodegen where
@@ -33,7 +34,11 @@ import Data.Maybe (fromMaybe)
 import qualified Data.Sequence as S
 import Data.Sequence ((|>),ViewL(..))
 import System.Exit ( ExitCode(..) )
+#if defined(__MHS__)
+import MhsTool.Process
+#else
 import System.Process
+#endif
 
 import C
 import Common
