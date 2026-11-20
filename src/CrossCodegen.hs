@@ -4,7 +4,7 @@ module CrossCodegen
 
 import Control.Exception (IOException, catch)
 import Control.Monad (when)
-import Data.Char (isAlphaNum, isSpace, toUpper)
+import Data.Char (isAlphaNum, toUpper)
 import Data.Foldable (foldl')
 import Data.Map.Strict (lookup)
 import Prelude hiding (lookup)
@@ -97,17 +97,10 @@ outTokenCross enableCol (out, state) (Text pos txt) =
     (str, state') =
         outTextHs state pos txt outTextSplit outHsLine
             (if enableCol then outHsColumn else const "")
-outTokenCross _ (out, (rowSync, colSync)) (Special pos key arg)
-    | key == "strict_import", all isSpace arg =
-        -- bindings-dsl under HSC2HS_ASM defines an object-like statement.
-        -- `{ hsc_strict_import }` is that statement. The fixture writes the
-        -- same tokens. Direct mode still emits `hsc_strict_import ();`.
-        let str = outCLine pos ++ "    { hsc_strict_import }\n"
-        in (out . showString str, (rowSync && null str, colSync && null str))
 outTokenCross enableCol acc tok@(Special _ _ _) =
-    -- Other specials are short (`hsc_const`, `hsc_enum`, preprocessor lines).
-    -- Delegate so the C statement and the (lineSync, colSync) update match
-    -- direct mode exactly.
+    -- Specials stay `hsc_<key> (<arg>);`, including `hsc_strict_import ();`.
+    -- That is the function-like macro bindings-dsl ships. Delegate so the C
+    -- statement and the (lineSync, colSync) update match direct mode exactly.
     outTokenHs enableCol acc tok
 
 -- HSC_EMIT_STR rejects strlen > 512. A single source span in an `.hsc`
