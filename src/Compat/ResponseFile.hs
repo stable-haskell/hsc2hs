@@ -3,11 +3,11 @@
 
 -- taken from base-4.12.0.0's "GHC.ResponseFile"
 
-module Compat.ResponseFile ( getArgsWithResponseFiles ) where
+module Compat.ResponseFile ( getArgsWithResponseFiles, escapeArgs ) where
 
 #if MIN_VERSION_base(4,12,0)
 
-import           GHC.ResponseFile   (getArgsWithResponseFiles)
+import           GHC.ResponseFile   (getArgsWithResponseFiles, escapeArgs)
 
 #else
 
@@ -114,5 +114,14 @@ unescape args = reverse . map reverse $ go args NoneQ False [] []
         | '\'' == c              = go cs SngQ  False a     as
         | '"'  == c              = go cs DblQ  False a     as
         | otherwise              = go cs NoneQ False (c:a) as
+
+-- | One escaped argument per line, matching 'GHC.ResponseFile.escapeArgs'.
+escapeArgs :: [String] -> String
+escapeArgs = unlines . map escapeOne
+  where
+    escapeOne = reverse . foldl escape []
+    escape cs c
+        | c == '\\' || c == '\'' || c == '"' || isSpace c = c : '\\' : cs
+        | otherwise = c : cs
 
 #endif

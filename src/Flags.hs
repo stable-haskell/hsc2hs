@@ -24,6 +24,7 @@ data ConfigM m = Config {
                      cColumn :: Bool,
                      cVerbose :: Bool,
                      cNoBatch :: Bool,
+                     cCrossRunner :: Maybe String,
                      cFlags :: [Flag]
                  }
 
@@ -49,6 +50,7 @@ emptyMode = UseConfig $ Config {
                             cColumn       = False,
                             cVerbose      = False,
                             cNoBatch      = False,
+                            cCrossRunner  = Nothing,
                             cFlags        = []
                         }
 
@@ -58,6 +60,7 @@ data Flag
     | Include   String
     | Define    String (Maybe String)
     | Output    String
+    | RunnerFlag String
     deriving (Eq, Show)
 
 options :: [OptDescr (Mode -> Mode)]
@@ -84,10 +87,16 @@ options = [
         "stop after writing *_hsc_make.c",
     Option ['x'] ["cross-compile"] (NoArg (withConfig $ setCrossCompile True))
         "activate cross-compilation mode",
+    Option [] ["no-cross-compile"] (NoArg (withConfig $ setCrossCompile False))
+        "deactivate cross-compilation mode (overrides an earlier -x/--cross-compile)",
+    Option [] ["cross-runner"] (ReqArg (\s -> withConfig $ setCrossRunner s) "CMD")
+        "run the probe via CMD (overrides -x); CMD may contain quoted arguments",
+    Option [] ["cross-runner-arg"] (ReqArg (addFlag . RunnerFlag) "ARG")
+        "pass ARG to --cross-runner (repeatable, no word-splitting)",
     Option [] ["via-asm"] (NoArg (withConfig $ setViaAsm True))
-        "use a crude asm parser to compute constants when cross compiling",
+        "accepted for compatibility; --cross-compile always uses one assembly pass",
     Option [] ["cross-safe"] (NoArg (withConfig $ setCrossSafe True))
-        "restrict .hsc directives to those supported by --cross-compile",
+        "run the cross-compile assembly backend even for a native build",
     Option [] ["no-batch"] (NoArg (withConfig $ setNoBatch True))
         "disable batched cross-compilation (for debugging)",
     Option ['k'] ["keep-files"] (NoArg (withConfig $ setKeepFiles True))
@@ -144,6 +153,9 @@ setColumn b c = c { cColumn = b }
 
 setNoBatch :: Bool -> ConfigM Maybe -> ConfigM Maybe
 setNoBatch b c = c { cNoBatch = b }
+
+setCrossRunner :: String -> ConfigM Maybe -> ConfigM Maybe
+setCrossRunner cmd c = c { cCrossRunner = if null cmd then Nothing else Just cmd }
 
 setVerbose :: Bool -> ConfigM Maybe -> ConfigM Maybe
 setVerbose v c = c { cVerbose = v }
